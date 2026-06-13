@@ -1,5 +1,8 @@
 import type { NewsItem } from "@/lib/types"
 import { formatRelativeTime } from "@/lib/utils"
+import SummarizeButton from "@/components/SummarizeButton"
+
+const HAS_BACKEND = !!process.env.PYTHON_API_URL
 
 export default function NewsCard({ item }: { item: NewsItem }) {
   return (
@@ -24,9 +27,10 @@ export default function NewsCard({ item }: { item: NewsItem }) {
         </span>
       </div>
       {item.description && (
-        <p className="text-sm text-gray-600 leading-relaxed">
-          {item.description}
-        </p>
+        <p className="text-sm text-gray-600 leading-relaxed">{item.description}</p>
+      )}
+      {HAS_BACKEND && (
+        <SummarizeButton title={item.title} description={item.description} />
       )}
     </div>
   )
