@@ -1,5 +1,7 @@
 import os
 import hashlib
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -67,9 +69,13 @@ def index_articles() -> None:
             print(f"[index] {src['name']} error: {e}")
 
 
+_executor = ThreadPoolExecutor(max_workers=1)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    index_articles()
+    # Run indexing in background so the server binds the port immediately
+    asyncio.get_event_loop().run_in_executor(_executor, index_articles)
     yield
 
 
