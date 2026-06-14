@@ -21,6 +21,9 @@ RSS_SOURCES = [
     {"url": "https://www.wired.com/feed/tag/ai/latest/rss", "name": "Wired"},
 ]
 
+HN_KEYWORDS = ["AI", "artificial intelligence", "LLM", "machine learning", "OpenAI", "Anthropic"]
+REDDIT_SUBREDDITS = ["artificial", "MachineLearning"]
+
 COLLECTION = "ai_news"
 VECTOR_SIZE = 384
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -41,6 +44,71 @@ def make_id(url: str) -> int:
 
 def _get_qdrant() -> QdrantClient:
     return QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"])
+
+
+def fetch_hacker_news(limit: int = 30) -> list[dict]:
+    """Fetch AI-related HN stories via Algolia Search API."""
+    seen: set[str] = set()
+    results: list[dict] = []
+    with httpx.Client(timeout=10) as client:
+        for kw in HN_KEYWORDS:
+            if len(results) >= limit:
+                break
+            try:
+                resp = client.get(
+                    "https://hn.algolia.com/api/v1/search",
+                    params={"query": kw, "tags": "story", "hitsPerPage": 10},
+                )
+                for hit in resp.json().get("hits", []):
+                    if len(results) >= limit:
+                        break
+                    oid = hit.get("objectID", "")
+                    url = hit.get("url", "")
+                    title = hit.get("title", "")
+                    if not url or not title or oid in seen:
+                        continue
+                    seen.add(oid)
+                    results.append({
+                        "url": url,
+                        "title": title,
+                        "description": "",
+                        "score": hit.get("points", 0),
+                        "source": "Hacker News",
+                    })
+            except Exception as e:
+                print(f"[hn] keyword '{kw}' error: {e}")
+    print(f"[hn] Fetched {len(results)} stories")
+    return results
+
+
+def fetch_reddit(subreddit: str, limit: int = 25) -> list[dict]:
+    """Fetch top posts from a subreddit via the public JSON API."""
+    try:
+        url = f"https://www.reddit.com/r/{subreddit}/top.json?t=day&limit={limit}"
+        with httpx.Client(timeout=10, headers={"User-Agent": "ai-news-bot/1.0"}) as client:
+            resp = client.get(url)
+        results = []
+        for child in resp.json().get("data", {}).get("children", []):
+            post = child.get("data", {})
+            post_url = post.get("url", "")
+            title = post.get("title", "")
+            if not post_url or not title:
+                continue
+            if post_url.startswith("https://www.reddit.com"):
+                post_url = "https://www.reddit.com" + post.get("permalink", "")
+            score = post.get("score", 0) + post.get("num_comments", 0) * 2
+            results.append({
+                "url": post_url,
+                "title": title,
+                "description": post.get("selftext", "")[:500],
+                "score": score,
+                "source": f"Reddit r/{subreddit}",
+            })
+        print(f"[reddit:{subreddit}] Fetched {len(results)} posts")
+        return results
+    except Exception as e:
+        print(f"[reddit:{subreddit}] Error: {e}")
+        return []
 
 
 def translate_to_english(query: str) -> str:
@@ -135,13 +203,40 @@ def cleanup_articles(q: QdrantClient) -> None:
         print(f"[cleanup] Trimmed {len(excess)} excess articles to stay under {MAX_ARTICLES}")
 
 
+def _upsert_social(articles: list[dict], q: QdrantClient, now_iso: str) -> int:
+    """Embed and upsert social articles (HN / Reddit). Returns count inserted."""
+    points = []
+    for article in articles:
+        try:
+            vec = embed(f"{article['title']}. {article['description']}"[:512])
+            points.append(
+                PointStruct(
+                    id=make_id(article["url"]),
+                    vector=vec,
+                    payload={
+                        "title": article["title"],
+                        "url": article["url"],
+                        "source": article["source"],
+                        "description": article["description"],
+                        "indexed_at": now_iso,
+                        "trending_score": article["score"],
+                    },
+                )
+            )
+        except Exception as e:
+            print(f"[social] embed error: {e}")
+    if points:
+        q.upsert(collection_name=COLLECTION, points=points)
+    return len(points)
+
+
 def index_articles() -> None:
     q = _get_qdrant()
     ensure_collection(q)
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Pass 1: upsert all articles with score=0 so they're searchable
-    all_points: list[tuple[int, list[float]]] = []
+    # Pass 1: upsert RSS articles with trending_score=0
+    all_rss: list[tuple[int, list[float]]] = []
     for src in RSS_SOURCES:
         try:
             feed = feedparser.parse(src["url"])
@@ -169,24 +264,36 @@ def index_articles() -> None:
                         },
                     )
                 )
-                all_points.append((article_id, vec))
+                all_rss.append((article_id, vec))
             if points:
                 q.upsert(collection_name=COLLECTION, points=points)
             print(f"[index] {src['name']}: {len(points)} articles inserted")
         except Exception as e:
             print(f"[index] {src['name']} error: {e}")
 
-    # Pass 2: now that all articles are in DB, recalculate trending scores
-    for article_id, vec in all_points:
+    # Pass 2: update cross-coverage scores for RSS articles (×10 to be comparable with social scores)
+    for article_id, vec in all_rss:
         score = get_trending_score(vec, article_id, q)
         if score > 0:
             q.set_payload(
                 collection_name=COLLECTION,
-                payload={"trending_score": score},
+                payload={"trending_score": score * 10},
                 points=[article_id],
             )
+    print(f"[index] Cross-coverage scores updated for {len(all_rss)} RSS articles")
 
-    print(f"[index] Trending scores updated for {len(all_points)} articles")
+    # Pass 3: Hacker News (social score overwrites RSS cross-coverage if same URL)
+    hn_articles = fetch_hacker_news(limit=30)
+    n = _upsert_social(hn_articles, q, now_iso)
+    print(f"[index] Hacker News: {n} articles upserted")
+
+    # Pass 4: Reddit
+    reddit_articles: list[dict] = []
+    for sub in REDDIT_SUBREDDITS:
+        reddit_articles.extend(fetch_reddit(sub, limit=25))
+    n = _upsert_social(reddit_articles, q, now_iso)
+    print(f"[index] Reddit: {n} articles upserted")
+
     cleanup_articles(q)
 
 

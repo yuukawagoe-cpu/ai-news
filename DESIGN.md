@@ -41,27 +41,52 @@ Vercel Analytics
 src/
 ├── app/
 │   ├── globals.css                 # Tailwind ディレクティブ（@tailwind base/components/utilities）
-│   ├── layout.tsx                  # ルートレイアウト（Analytics設置・共通メタデータ）
+│   ├── layout.tsx                  # ルートレイアウト（Analytics・TranslationProvider）
 │   ├── loading.tsx                 # 初回ナビゲーション時のフルページスケルトン
 │   ├── page.tsx                    # トップページ（同期 Server Component）
+│   ├── search/
+│   │   └── page.tsx                # セマンティック検索ページ
 │   └── api/
-│       └── news/
-│           └── route.ts            # GET /api/news（Phase 2 用予約）
+│       ├── news/
+│       │   └── route.ts            # GET /api/news（予約）
+│       ├── search/
+│       │   └── route.ts            # POST /api/search（Vercel → FastAPI プロキシ）
+│       ├── summarize/
+│       │   └── route.ts            # POST /api/summarize（Vercel → FastAPI プロキシ）
+│       ├── trending/
+│       │   └── route.ts            # GET /api/trending（Vercel → FastAPI プロキシ）
+│       ├── translate/
+│       │   └── route.ts            # POST /api/translate（Groq バッチ翻訳）
+│       └── cron/
+│           └── reindex/
+│               └── route.ts        # GET /api/cron/reindex（Vercel Cron → 再インデックス）
 ├── components/
-│   ├── Header.tsx                  # ヘッダー（アプリ名・サブタイトル）
+│   ├── Header.tsx                  # ヘッダー（TranslateToggle・AI検索リンク）
 │   ├── FilterBar.tsx               # ソースフィルター（Client Component）
 │   ├── FilterBarSkeleton.tsx       # FilterBar のローディングプレースホルダー
 │   ├── NewsSection.tsx             # ニュース取得担当（非同期 Server Component）
-│   ├── NewsList.tsx                # ニュース一覧（記事が届いた後のレイアウト）
-│   ├── NewsCard.tsx                # 記事カード 1 件
+│   ├── NewsList.tsx                # ニュース一覧（Client Component・翻訳対応）
+│   ├── NewsCard.tsx                # 記事カード 1 件（displayTitle prop 対応）
 │   ├── NewsCardSkeleton.tsx        # 記事カードのローディングプレースホルダー
-│   └── NewsGridSkeleton.tsx        # NewsCardSkeleton を グリッドで並べたもの
+│   ├── NewsGridSkeleton.tsx        # NewsCardSkeleton をグリッドで並べたもの
+│   ├── SummarizeButton.tsx         # AI要約ボタン（Client Component）
+│   ├── SearchClient.tsx            # セマンティック検索UI（Client Component）
+│   ├── TrendingBox.tsx             # 話題トピックボックス（Client Component）
+│   └── TranslateToggle.tsx         # 翻訳トグルボタン（Client Component）
+├── context/
+│   └── TranslationContext.tsx      # 翻訳状態管理（React Context）
 ├── lib/
 │   ├── types.ts                    # 型定義
 │   ├── rss.ts                      # RSS取得・パースロジック
 │   └── utils.ts                    # UIユーティリティ（formatRelativeTime）
 └── constants/
     └── sources.ts                  # RSSソース一覧
+
+python-backend/
+├── main.py                         # FastAPI バックエンド（要約・検索・索引化・ソーシャル話題度）
+└── requirements.txt                # Python 依存パッケージ
+
+vercel.json                         # Vercel Cron 設定
 ```
 
 ---
@@ -273,7 +298,7 @@ import { RSS_SOURCES } from "@/constants/sources"
 |------|------|
 | 目的 | XML の item 要素を `NewsItem` 型に正規化する |
 | 引数 | `item`: `@xmldom/xmldom` の `Element`、`source`: ソース情報 |
-| 処理 | 1. タグを取得する。`const title = getTagText(item, "title")`、`const link = getTagText(item, "link")` で取得。`const dateStr = getTagText(item, "pubDate") \|\| getTagText(item, "published") \|\| getTagText(item, "updated")` の順で最初に非空の日付文字列を取得する（`published`・`updated` は Atom フォーマットのフォールバック）。`const rawDesc = getTagText(item, "description") \|\| getTagText(item, "summary") \|\| getTagText(item, "content:encoded")` の順で最初に非空の概要文字列を取得する（`summary`・`content:encoded` は Atom/拡張フォーマットのフォールバック）<br>2. `title` または `link` が空文字の場合は `null` を返す<br>3. `NewsItem.description` = `truncate(stripHtml(rawDesc), 200)`<br>4. `publishedAt`: 取得した日付文字列が空文字、または `isNaN(new Date(dateStr).getTime())` が `true` の場合は `"1970-01-01T00:00:00.000Z"`（日付不正記事をリスト末尾に送るため）を使用。それ以外は `new Date(dateStr).toISOString()`<br>5. `id` は `generateId(link)` で生成<br>6. `source` フィールドは `source.name` をセット |
+| 処理 | 1. タグを取得する。`const title = getTagText(item, "title")`、`const link = getTagText(item, "link")` で取得。`const dateStr = getTagText(item, "pubDate") \|\| getTagText(item, "published") \|\| getTagText(item, "updated")` の順で最初に非空の日付文字列を取得する（`published`・`updated` は Atom フォーマットのフォールバック）。`const rawDesc = getTagText(item, "description") \|\| getTagText(item, "summary") \|\| getTagText(item, "content:encoded")` の順で最初に非空の概要文字列を取得する（`summary`・`content:encoded` は Atom/拡張フォーマットのフォールバック）<br>2. `title` または `link` が空文字の場合は `null` を返す<br>3. `description` は `stripHtml()` → `truncate(200)` の順に整形<br>4. `publishedAt`: 取得した日付文字列が空文字、または `isNaN(new Date(dateStr).getTime())` が `true` の場合は `"1970-01-01T00:00:00.000Z"`（日付不正記事をリスト末尾に送るため）を使用。それ以外は `new Date(dateStr).toISOString()`<br>5. `id` は `generateId(link)` で生成<br>6. `source` フィールドは `source.name` をセット |
 | 返り値 | `NewsItem`、または title / link が欠如している場合は `null` |
 
 ---
@@ -465,29 +490,93 @@ import { fetchAllNews } from "@/lib/rss"
 
 ---
 
-## 11. Phase 2 設計概要（実装は時間があれば）
+## 11. Phase 2 設計概要（実装済み）
 
-Phase 2 では、Next.js のフロントエンドはそのままに、Python バックエンドを別サービスとして追加する。
+Phase 2 では、Next.js のフロントエンドはそのままに、Python バックエンドを別サービスとして追加した。
 
 ```
 Next.js (Vercel)
-  └── 要約・検索リクエストを Python API に投げる（PYTHON_API_URL 環境変数で指定）
+  ├── POST /api/summarize  → FastAPI /summarize（Groq で日本語3文要約）
+  ├── POST /api/search     → FastAPI /search（セマンティック検索 + 回答生成）
+  ├── GET  /api/trending   → FastAPI /trending（話題度上位記事 + 要約）
+  ├── POST /api/translate  → Groq 直接呼び出し（タイトルバッチ翻訳）
+  └── GET  /api/cron/reindex → FastAPI /reindex（Vercel Cron から毎日呼び出し）
 
 Python FastAPI (Render.com 無料枠)
-  ├── POST /summarize  { url: string } → { summary: string }
-  └── POST /search     { query: string } → { items: NewsItem[] }
+  ├── GET  /health
+  ├── POST /reindex   — RSS + HN + Reddit を再インデックス・古記事クリーンアップ
+  ├── GET  /trending  — 話題度上位 N 件を返す（日本語要約付き）
+  ├── POST /summarize — 記事タイトル・概要から日本語3文要約
+  └── POST /search    — 日本語クエリ → 英語翻訳 → 類似検索 → 日本語回答
 
-LangChain パイプライン
-  ├── RSS取得 → テキスト抽出 → Embedding モデルでベクトル化
-  ├── ChromaDB（ベクトルDB・ローカルファイル永続化）に保存
-  └── クエリ → 類似記事検索 → LLM で回答生成
+Embedding / Vector DB
+  ├── fastembed（sentence-transformers/all-MiniLM-L6-v2, 384次元 ONNX）
+  └── Qdrant Cloud（外部永続化・Render.com スピンダウン後も保持）
 
-LLM / Embedding
-  ├── Groq API（無料枠）: llama-3 系モデルで要約・回答生成
-  └── Hugging Face Inference API（無料）: all-MiniLM-L6-v2 で埋め込みベクトル生成
+LLM
+  └── Groq API httpx 直接呼び出し（llama-3.3-70b-versatile）
+      ※ groq SDK は httpx 0.28 と非互換のため使用しない
 ```
 
-> **⚠️ Phase 2 設計上の注意**: Render.com の Free Web Service はファイルシステムが一時的で、再デプロイ・スピンダウン時にローカルファイルへの変更が失われる。ChromaDB のローカルファイル永続化はこの制約に非対応であるため、Phase 2 を実装する場合は Qdrant Cloud 無料枠等の外部ベクトル DB への移行、または「再起動のたびに再インデックス」するデモ実装として割り切ることを検討する。
+---
+
+## 12. Phase 3 設計概要（ソーシャル話題度・実装済み）
+
+RSS のクロスカバレッジスコアから Hacker News・Reddit の社会的スコアに移行する。
+
+### データソース
+
+| ソース | API | 取得するもの |
+|--------|-----|-------------|
+| Hacker News | Algolia HN Search API（無料・認証不要） | ポイント数（points）・タイトル・URL |
+| Reddit r/artificial | Reddit JSON API（無料・User-Agent 必須） | スコア + コメント数 × 2 |
+| Reddit r/MachineLearning | Reddit JSON API | 同上 |
+
+### `fetch_hacker_news(limit: int) -> list[dict]`
+
+| 項目 | 内容 |
+|------|------|
+| エンドポイント | `https://hn.algolia.com/api/v1/search?query={kw}&tags=story&hitsPerPage=10` |
+| キーワード | `AI`, `artificial intelligence`, `LLM`, `machine learning`, `OpenAI`, `Anthropic` を順に検索 |
+| 重複排除 | `objectID` で管理 |
+| 返却フィールド | `url`, `title`, `score`（= HN ポイント数）, `source = "Hacker News"` |
+
+### `fetch_reddit(subreddit: str, limit: int) -> list[dict]`
+
+| 項目 | 内容 |
+|------|------|
+| エンドポイント | `https://www.reddit.com/r/{subreddit}/top.json?t=day&limit={limit}` |
+| User-Agent | `ai-news-bot/1.0`（Reddit API 要件） |
+| スコア計算 | `post["score"] + post["num_comments"] * 2` |
+| 返却フィールド | `url`, `title`, `score`, `source = "Reddit r/{subreddit}"` |
+
+### `index_articles()` の4パス構成
+
+```
+Pass 1: RSS 4ソース → Qdrant upsert（trending_score = 0）
+Pass 2: RSS記事のコサイン類似度クロスカバレッジを計算 → set_payload（score × 10）
+Pass 3: HN記事 → Qdrant upsert（trending_score = HN ポイント数）
+         ※ 同じ URL の RSS 記事があれば社会的スコアで上書き
+Pass 4: Reddit記事 → Qdrant upsert（trending_score = Reddit スコア）
+         ※ 同じ URL の記事があれば社会的スコアで上書き
+後処理: cleanup_articles()（30日 + 低スコア記事削除・500件上限）
+```
+
+### trending_score の優先順位
+
+```
+社会的スコア（HN/Reddit）> RSS クロスカバレッジ × 10
+```
+
+同じ URL の記事が HN/Reddit にもある場合、後でupsert される社会的スコアが優先される。
+
+### `/trending` エンドポイントの有効スコア計算
+
+```python
+effective_score = (1 + trending_score) * exp(-days_old * 0.1)
+```
+
+`trending_score = 0` でも新着（days_old = 0）なら `effective_score = 1` となり表示対象になる。
 
 ---
 

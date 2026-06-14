@@ -42,7 +42,14 @@
 | src/app/search/page.tsx | 検索ページ（Server Component） |
 | src/app/api/summarize/route.ts | POST /api/summarize（Vercel → FastAPI プロキシ） |
 | src/app/api/search/route.ts | POST /api/search（Vercel → FastAPI プロキシ） |
-| python-backend/main.py | FastAPI バックエンド（要約・検索・RSS索引化） |
+| src/context/TranslationContext.tsx | 翻訳ON/OFF状態管理（React Context） |
+| src/components/TranslateToggle.tsx | 日本語タイトル翻訳トグルボタン（Client Component） |
+| src/components/TrendingBox.tsx | 話題トピックボックス（Client Component） |
+| src/app/api/trending/route.ts | GET /api/trending（Vercel → FastAPI プロキシ） |
+| src/app/api/translate/route.ts | POST /api/translate（Groq バッチ翻訳） |
+| src/app/api/cron/reindex/route.ts | GET /api/cron/reindex（Vercel Cron → 再インデックス） |
+| vercel.json | Vercel Cron 設定（毎日 0:00 UTC） |
+| python-backend/main.py | FastAPI バックエンド（要約・検索・RSS索引化・社会的話題度） |
 | python-backend/requirements.txt | Python 依存パッケージ一覧 |
 
 ---
@@ -82,12 +89,24 @@
 - [ ] Vercel Analytics で閲覧データを計測する
 - [ ] レスポンシブデザイン（PC・スマートフォン対応）
 
-#### Phase 2（時間があれば・バックエンド拡張）
+#### Phase 2（実装済み・バックエンド拡張）
 
-- [ ] Python + FastAPI によるバックエンドAPIの追加
-- [ ] LangChain + LLM（Groq / Gemini 無料枠）による記事の自動要約
-- [ ] RAG + ベクトルDB（ChromaDB）による記事の蓄積と自然言語検索
-- [ ] 「先週のLLM関連ニュースを検索」等のセマンティック検索UI
+- [x] Python + FastAPI によるバックエンドAPI（Render.com 無料枠）
+- [x] Groq API（llama-3.3-70b-versatile）による記事の日本語AI要約
+- [x] fastembed + Qdrant Cloud によるベクトル検索・記事蓄積
+- [x] 自然言語検索UI（「先週のLLM関連ニュースを検索」等）
+- [x] ヘッダーの日本語翻訳トグルボタン（タイトルをバッチ翻訳）
+- [x] 話題トピックボックス（トップ3記事 + AI要約をページ最上部に表示）
+- [x] 話題度スコア（同トピック記事の同時掲載数 × 時間減衰）
+- [x] 定期インデックス化（Vercel Cron 毎日0:00 UTC）・古記事自動削除
+
+#### Phase 3（実装予定・ソーシャル話題度）
+
+- [ ] Hacker News API による社会的スコア取得（ポイント数・無料・認証不要）
+- [ ] Reddit r/artificial・r/MachineLearning の投票数取得（無料 JSON API）
+- [ ] 話題度 = HN ポイント + Reddit スコア（SNS で話題なら上位表示）
+- [ ] AIキーワードフィルター（無関係な記事を除外）
+- [ ] 社会的スコアが RSS クロスカバレッジより優先（同URL記事は上書き）
 
 ### 非機能要件（確定）
 
@@ -165,3 +184,16 @@
   - `PYTHON_API_URL` の BOM 文字（PowerShell の `echo` が付加）→ `.replace(/^﻿/, "")` で除去
   - 日本語クエリの検索精度低下 → Groq で英語翻訳してから埋め込み
 - **現在の状態**: **Phase 2 完全完了**。要約・セマンティック検索とも本番環境で動作確認済み。
+
+### 2026-06-14（Phase 3 着手）
+- **背景**: 話題度スコアが「4媒体のRSSで同トピックが何件あるか」に依存していたため、1媒体しか取り上げないニュース（例: Fable）がスコア0になる問題があった
+- **作業内容**: ソーシャル話題度機能を設計・実装
+  - `python-backend/main.py` に `fetch_hacker_news()`・`fetch_reddit()` を追加
+  - Hacker News Algolia Search API でAI関連記事とポイント数を取得
+  - Reddit r/artificial・r/MachineLearning のトップ投稿を JSON API で取得
+  - `index_articles()` を4パス構成に変更
+    - Pass 1: RSS記事を一括 upsert（score=0）
+    - Pass 2: コサイン類似度でクロスカバレッジスコアを更新（×10スケーリング）
+    - Pass 3: HN記事を upsert（同URL記事はソーシャルスコアで上書き）
+    - Pass 4: Reddit記事を upsert（同URL記事はソーシャルスコアで上書き）
+- **現在の状態**: **Phase 3 実装完了**。GitHub・Vercel・Render.com にデプロイ済み。
