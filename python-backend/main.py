@@ -134,32 +134,31 @@ def search(req: SearchReq):
     try:
         vector = embed(req.query)
         hits = _get_qdrant().search(collection_name=COLLECTION, query_vector=vector, limit=10)
-    except Exception:
-        raise HTTPException(
-            status_code=503,
-            detail="検索インデックスが準備中です。しばらく待ってから再試行してください。",
+
+        items = [
+            {
+                "title": h.payload["title"],
+                "url": h.payload["url"],
+                "source": h.payload["source"],
+                "description": h.payload.get("description", ""),
+                "score": round(h.score, 3),
+            }
+            for h in hits
+        ]
+
+        context = "\n".join(f"- {i['title']} ({i['source']})" for i in items[:5])
+        prompt = (
+            f"ユーザーの質問: {req.query}\n\n"
+            f"関連記事:\n{context}\n\n"
+            f"上記の記事に基づいて、質問に日本語で簡潔に回答してください。"
         )
-
-    items = [
-        {
-            "title": h.payload["title"],
-            "url": h.payload["url"],
-            "source": h.payload["source"],
-            "description": h.payload.get("description", ""),
-            "score": round(h.score, 3),
-        }
-        for h in hits
-    ]
-
-    context = "\n".join(f"- {i['title']} ({i['source']})" for i in items[:5])
-    prompt = (
-        f"ユーザーの質問: {req.query}\n\n"
-        f"関連記事:\n{context}\n\n"
-        f"上記の記事に基づいて、質問に日本語で簡潔に回答してください。"
-    )
-    res = _get_groq().chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
-    )
-    return {"answer": res.choices[0].message.content, "items": items}
+        res = _get_groq().chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+        )
+        return {"answer": res.choices[0].message.content, "items": items}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
