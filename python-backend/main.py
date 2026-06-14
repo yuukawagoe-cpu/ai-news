@@ -22,8 +22,14 @@ RSS_SOURCES = [
 COLLECTION = "ai_news"
 VECTOR_SIZE = 384
 
-groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
-qdrant = QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"])
+def _get_groq() -> Groq:
+    return Groq(api_key=os.environ["GROQ_API_KEY"])
+
+
+def _get_qdrant() -> QdrantClient:
+    return QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"])
+
+
 embed_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
 
 
@@ -35,17 +41,18 @@ def make_id(url: str) -> int:
     return int(hashlib.md5(url.encode()).hexdigest(), 16) % (2**63)
 
 
-def ensure_collection() -> None:
-    names = [c.name for c in qdrant.get_collections().collections]
+def ensure_collection(q: QdrantClient) -> None:
+    names = [c.name for c in q.get_collections().collections]
     if COLLECTION not in names:
-        qdrant.create_collection(
+        q.create_collection(
             collection_name=COLLECTION,
             vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
         )
 
 
 def index_articles() -> None:
-    ensure_collection()
+    q = _get_qdrant()
+    ensure_collection(q)
     for src in RSS_SOURCES:
         try:
             feed = feedparser.parse(src["url"])
@@ -63,7 +70,7 @@ def index_articles() -> None:
                     payload={"title": title, "url": url, "source": src["name"], "description": desc[:500]},
                 ))
             if points:
-                qdrant.upsert(collection_name=COLLECTION, points=points)
+                q.upsert(collection_name=COLLECTION, points=points)
             print(f"[index] {src['name']}: {len(points)} articles indexed")
         except Exception as e:
             print(f"[index] {src['name']} error: {e}")
@@ -114,7 +121,7 @@ def summarize(req: SummarizeReq):
         f"以下のAI関連記事を日本語で3文以内に要約してください。\n\n"
         f"タイトル: {req.title}\n概要: {req.description}"
     )
-    res = groq_client.chat.completions.create(
+    res = _get_groq().chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=200,
@@ -126,7 +133,7 @@ def summarize(req: SummarizeReq):
 def search(req: SearchReq):
     try:
         vector = embed(req.query)
-        hits = qdrant.search(collection_name=COLLECTION, query_vector=vector, limit=10)
+        hits = _get_qdrant().search(collection_name=COLLECTION, query_vector=vector, limit=10)
     except Exception:
         raise HTTPException(
             status_code=503,
@@ -150,7 +157,7 @@ def search(req: SearchReq):
         f"関連記事:\n{context}\n\n"
         f"上記の記事に基づいて、質問に日本語で簡潔に回答してください。"
     )
-    res = groq_client.chat.completions.create(
+    res = _get_groq().chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=300,
