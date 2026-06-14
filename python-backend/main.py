@@ -3,10 +3,10 @@ import hashlib
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from groq import Groq
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from fastembed import TextEmbedding
@@ -21,16 +21,11 @@ RSS_SOURCES = [
 
 COLLECTION = "ai_news"
 VECTOR_SIZE = 384
-
-def _get_groq() -> Groq:
-    return Groq(api_key=os.environ["GROQ_API_KEY"])
-
-
-def _get_qdrant() -> QdrantClient:
-    return QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"])
-
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 embed_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+_executor = ThreadPoolExecutor(max_workers=1)
 
 
 def embed(text: str) -> list[float]:
@@ -39,6 +34,28 @@ def embed(text: str) -> list[float]:
 
 def make_id(url: str) -> int:
     return int(hashlib.md5(url.encode()).hexdigest(), 16) % (2**63)
+
+
+def _get_qdrant() -> QdrantClient:
+    return QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"])
+
+
+def call_groq(prompt: str, max_tokens: int) -> str:
+    with httpx.Client(timeout=30) as client:
+        res = client.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {os.environ['GROQ_API_KEY']}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+            },
+        )
+        res.raise_for_status()
+        return res.json()["choices"][0]["message"]["content"]
 
 
 def ensure_collection(q: QdrantClient) -> None:
@@ -76,12 +93,8 @@ def index_articles() -> None:
             print(f"[index] {src['name']} error: {e}")
 
 
-_executor = ThreadPoolExecutor(max_workers=1)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Run indexing in background so the server binds the port immediately
     asyncio.get_event_loop().run_in_executor(_executor, index_articles)
     yield
 
@@ -117,16 +130,14 @@ def reindex():
 
 @app.post("/summarize")
 def summarize(req: SummarizeReq):
-    prompt = (
-        f"以下のAI関連記事を日本語で3文以内に要約してください。\n\n"
-        f"タイトル: {req.title}\n概要: {req.description}"
-    )
-    res = _get_groq().chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=200,
-    )
-    return {"summary": res.choices[0].message.content}
+    try:
+        prompt = (
+            f"以下のAI関連記事を日本語で3文以内に要約してください。\n\n"
+            f"タイトル: {req.title}\n概要: {req.description}"
+        )
+        return {"summary": call_groq(prompt, max_tokens=200)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @app.post("/search")
@@ -152,12 +163,7 @@ def search(req: SearchReq):
             f"関連記事:\n{context}\n\n"
             f"上記の記事に基づいて、質問に日本語で簡潔に回答してください。"
         )
-        res = _get_groq().chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=300,
-        )
-        return {"answer": res.choices[0].message.content, "items": items}
+        return {"answer": call_groq(prompt, max_tokens=300), "items": items}
     except HTTPException:
         raise
     except Exception as e:
