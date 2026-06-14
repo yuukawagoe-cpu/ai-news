@@ -10,7 +10,6 @@ export default function Header() {
         <Link href="/search" className="text-sm text-blue-600 hover:underline">
           AI検索
         </Link>
-        <p className="text-sm text-gray-500 hidden sm:block">最新のAIニュースをまとめて閲覧</p>
       </div>
     </header>
   )
