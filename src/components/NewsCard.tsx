@@ -2,9 +2,15 @@ import type { NewsItem } from "@/lib/types"
 import { formatRelativeTime } from "@/lib/utils"
 import SummarizeButton from "@/components/SummarizeButton"
 
-const HAS_BACKEND = !!process.env.PYTHON_API_URL
-
-export default function NewsCard({ item }: { item: NewsItem }) {
+export default function NewsCard({
+  item,
+  hasBackend,
+  displayTitle,
+}: {
+  item: NewsItem
+  hasBackend: boolean
+  displayTitle?: string
+}) {
   return (
     <div className="rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow">
       <a
@@ -15,7 +21,7 @@ export default function NewsCard({ item }: { item: NewsItem }) {
         className="block"
       >
         <h2 className="font-semibold text-base leading-snug mb-2 hover:underline line-clamp-2">
-          {item.title}
+          {displayTitle ?? item.title}
         </h2>
       </a>
       <div className="flex items-center gap-2 mb-2">
@@ -29,7 +35,7 @@ export default function NewsCard({ item }: { item: NewsItem }) {
       {item.description && (
         <p className="text-sm text-gray-600 leading-relaxed">{item.description}</p>
       )}
-      {HAS_BACKEND && (
+      {hasBackend && (
         <SummarizeButton title={item.title} description={item.description} />
       )}
     </div>

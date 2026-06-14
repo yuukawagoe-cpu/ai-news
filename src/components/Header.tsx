@@ -1,4 +1,5 @@
 import Link from "next/link"
+import TranslateToggle from "@/components/TranslateToggle"
 
 export default function Header() {
   return (
@@ -6,7 +7,8 @@ export default function Header() {
       <h1 className="text-xl font-bold">
         <Link href="/">AI News</Link>
       </h1>
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
+        <TranslateToggle />
         <Link href="/search" className="text-sm text-blue-600 hover:underline">
           AI検索
         </Link>

@@ -1,14 +1,16 @@
 import os
 import hashlib
 import asyncio
+import math
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, PointIdsList
 from fastembed import TextEmbedding
 import feedparser
 
@@ -23,6 +25,7 @@ COLLECTION = "ai_news"
 VECTOR_SIZE = 384
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
+MAX_ARTICLES = 500
 
 embed_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -72,9 +75,71 @@ def ensure_collection(q: QdrantClient) -> None:
         )
 
 
+def get_trending_score(vector: list[float], article_id: int, q: QdrantClient) -> int:
+    """Count existing articles on the same topic (cosine similarity > 0.78)."""
+    try:
+        hits = q.search(
+            collection_name=COLLECTION,
+            query_vector=vector,
+            limit=15,
+            score_threshold=0.78,
+        )
+        return sum(1 for h in hits if h.id != article_id)
+    except Exception:
+        return 0
+
+
+def cleanup_articles(q: QdrantClient) -> None:
+    """Delete old/low-trending articles; enforce MAX_ARTICLES cap."""
+    now = datetime.now(timezone.utc)
+    results, _ = q.scroll(
+        collection_name=COLLECTION,
+        limit=1000,
+        with_payload=True,
+        with_vectors=False,
+    )
+
+    to_delete = []
+    for point in results:
+        p = point.payload
+        days_old = 999
+        try:
+            dt = datetime.fromisoformat(p.get("indexed_at", ""))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            days_old = (now - dt).days
+        except Exception:
+            pass
+
+        score = p.get("trending_score", 1)
+        if days_old > 90 or (days_old > 30 and score < 2):
+            to_delete.append(point.id)
+
+    if to_delete:
+        q.delete(collection_name=COLLECTION, points_selector=PointIdsList(points=to_delete))
+        print(f"[cleanup] Deleted {len(to_delete)} old/low-trending articles")
+
+    remaining, _ = q.scroll(
+        collection_name=COLLECTION,
+        limit=MAX_ARTICLES + 100,
+        with_payload=True,
+        with_vectors=False,
+    )
+    if len(remaining) > MAX_ARTICLES:
+        ranked = sorted(
+            remaining,
+            key=lambda p: (p.payload.get("trending_score", 1), p.payload.get("indexed_at", "")),
+        )
+        excess = [p.id for p in ranked[: len(remaining) - MAX_ARTICLES]]
+        q.delete(collection_name=COLLECTION, points_selector=PointIdsList(points=excess))
+        print(f"[cleanup] Trimmed {len(excess)} excess articles to stay under {MAX_ARTICLES}")
+
+
 def index_articles() -> None:
     q = _get_qdrant()
     ensure_collection(q)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     for src in RSS_SOURCES:
         try:
             feed = feedparser.parse(src["url"])
@@ -86,16 +151,30 @@ def index_articles() -> None:
                 if not url or not title:
                     continue
                 text = f"{title}. {desc}"[:512]
-                points.append(PointStruct(
-                    id=make_id(url),
-                    vector=embed(text),
-                    payload={"title": title, "url": url, "source": src["name"], "description": desc[:500]},
-                ))
+                vec = embed(text)
+                article_id = make_id(url)
+                trending = get_trending_score(vec, article_id, q)
+                points.append(
+                    PointStruct(
+                        id=article_id,
+                        vector=vec,
+                        payload={
+                            "title": title,
+                            "url": url,
+                            "source": src["name"],
+                            "description": desc[:500],
+                            "indexed_at": now_iso,
+                            "trending_score": trending,
+                        },
+                    )
+                )
             if points:
                 q.upsert(collection_name=COLLECTION, points=points)
             print(f"[index] {src['name']}: {len(points)} articles indexed")
         except Exception as e:
             print(f"[index] {src['name']} error: {e}")
+
+    cleanup_articles(q)
 
 
 @asynccontextmanager
@@ -133,6 +212,60 @@ def reindex():
     return {"status": "ok"}
 
 
+@app.get("/trending")
+def trending(limit: int = 3):
+    try:
+        q = _get_qdrant()
+        results, _ = q.scroll(
+            collection_name=COLLECTION,
+            limit=1000,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        now = datetime.now(timezone.utc)
+        scored = []
+        for point in results:
+            p = point.payload
+            days_old = 7
+            try:
+                dt = datetime.fromisoformat(p.get("indexed_at", ""))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                days_old = (now - dt).days
+            except Exception:
+                pass
+
+            raw = p.get("trending_score", 1)
+            effective = raw * math.exp(-days_old * 0.1)
+            scored.append({
+                "title": p.get("title", ""),
+                "url": p.get("url", ""),
+                "source": p.get("source", ""),
+                "description": p.get("description", ""),
+                "trending_score": raw,
+                "effective_score": round(effective, 3),
+            })
+
+        scored.sort(key=lambda x: x["effective_score"], reverse=True)
+        top = scored[:limit]
+
+        # Generate Japanese summaries for top articles
+        for item in top:
+            try:
+                prompt = (
+                    f"以下のAI関連記事を日本語で2文以内に要約してください。\n\n"
+                    f"タイトル: {item['title']}\n概要: {item['description']}"
+                )
+                item["summary"] = call_groq(prompt, max_tokens=150)
+            except Exception:
+                item["summary"] = ""
+
+        return {"items": top}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
 @app.post("/summarize")
 def summarize(req: SummarizeReq):
     try:
@@ -160,6 +293,7 @@ def search(req: SearchReq):
                 "source": h.payload["source"],
                 "description": h.payload.get("description", ""),
                 "score": round(h.score, 3),
+                "trending_score": h.payload.get("trending_score", 0),
             }
             for h in hits
         ]

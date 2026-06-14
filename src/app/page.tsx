@@ -4,6 +4,7 @@ import Header from "@/components/Header"
 import FilterBar from "@/components/FilterBar"
 import NewsSection from "@/components/NewsSection"
 import NewsGridSkeleton from "@/components/NewsGridSkeleton"
+import TrendingBox from "@/components/TrendingBox"
 
 export default function Page({
   searchParams,
@@ -22,6 +23,7 @@ export default function Page({
     <main>
       <Header />
       <div className="px-4 py-4">
+        <TrendingBox />
         <FilterBar sources={sources} selected={source} />
       </div>
       <div className="px-4 py-4">

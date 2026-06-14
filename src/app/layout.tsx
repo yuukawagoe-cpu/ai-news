@@ -1,5 +1,6 @@
 import type { Metadata } from "next"
 import { Analytics } from "@vercel/analytics/react"
+import { TranslationProvider } from "@/context/TranslationContext"
 import "./globals.css"
 
 export const metadata: Metadata = {
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="ja">
       <body>
-        {children}
+        <TranslationProvider>
+          {children}
+        </TranslationProvider>
         <Analytics />
       </body>
     </html>
