@@ -76,13 +76,13 @@ def ensure_collection(q: QdrantClient) -> None:
 
 
 def get_trending_score(vector: list[float], article_id: int, q: QdrantClient) -> int:
-    """Count existing articles on the same topic (cosine similarity > 0.78)."""
+    """Count existing articles on the same topic (cosine similarity > 0.72)."""
     try:
         hits = q.search(
             collection_name=COLLECTION,
             query_vector=vector,
             limit=15,
-            score_threshold=0.78,
+            score_threshold=0.72,
         )
         return sum(1 for h in hits if h.id != article_id)
     except Exception:
@@ -140,6 +140,8 @@ def index_articles() -> None:
     ensure_collection(q)
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    # Pass 1: upsert all articles with score=0 so they're searchable
+    all_points: list[tuple[int, list[float]]] = []
     for src in RSS_SOURCES:
         try:
             feed = feedparser.parse(src["url"])
@@ -153,7 +155,6 @@ def index_articles() -> None:
                 text = f"{title}. {desc}"[:512]
                 vec = embed(text)
                 article_id = make_id(url)
-                trending = get_trending_score(vec, article_id, q)
                 points.append(
                     PointStruct(
                         id=article_id,
@@ -164,16 +165,28 @@ def index_articles() -> None:
                             "source": src["name"],
                             "description": desc[:500],
                             "indexed_at": now_iso,
-                            "trending_score": trending,
+                            "trending_score": 0,
                         },
                     )
                 )
+                all_points.append((article_id, vec))
             if points:
                 q.upsert(collection_name=COLLECTION, points=points)
-            print(f"[index] {src['name']}: {len(points)} articles indexed")
+            print(f"[index] {src['name']}: {len(points)} articles inserted")
         except Exception as e:
             print(f"[index] {src['name']} error: {e}")
 
+    # Pass 2: now that all articles are in DB, recalculate trending scores
+    for article_id, vec in all_points:
+        score = get_trending_score(vec, article_id, q)
+        if score > 0:
+            q.set_payload(
+                collection_name=COLLECTION,
+                payload={"trending_score": score},
+                points=[article_id],
+            )
+
+    print(f"[index] Trending scores updated for {len(all_points)} articles")
     cleanup_articles(q)
 
 
@@ -236,8 +249,9 @@ def trending(limit: int = 3):
             except Exception:
                 pass
 
-            raw = p.get("trending_score", 1)
-            effective = raw * math.exp(-days_old * 0.1)
+            raw = p.get("trending_score", 0)
+            # Base score of 1 ensures recent articles always appear even with no cross-coverage
+            effective = (1 + raw) * math.exp(-days_old * 0.1)
             scored.append({
                 "title": p.get("title", ""),
                 "url": p.get("url", ""),
