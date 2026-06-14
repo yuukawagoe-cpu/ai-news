@@ -37,6 +37,13 @@
 | src/app/loading.tsx | 初回ナビゲーション用フルページスケルトン |
 | src/app/page.tsx | トップページ（同期 Server Component） |
 | src/app/layout.tsx | ルートレイアウト（Analytics・globals.css） |
+| src/components/SummarizeButton.tsx | AI要約ボタン（Client Component） |
+| src/components/SearchClient.tsx | セマンティック検索UI（Client Component） |
+| src/app/search/page.tsx | 検索ページ（Server Component） |
+| src/app/api/summarize/route.ts | POST /api/summarize（Vercel → FastAPI プロキシ） |
+| src/app/api/search/route.ts | POST /api/search（Vercel → FastAPI プロキシ） |
+| python-backend/main.py | FastAPI バックエンド（要約・検索・RSS索引化） |
+| python-backend/requirements.txt | Python 依存パッケージ一覧 |
 
 ---
 
@@ -121,3 +128,40 @@
   - `src/app/layout.tsx` — lang="ja"・Vercel Analytics・globals.css インポート
 - **修正内容**: `[...map.values()]` → `Array.from(map.values())` （TypeScript tsconfig target 未指定環境対応）; `package.json` の name を `myapp-init` → `myapp` に修正; 一時ディレクトリ `C:/Users/yuuka/myapp-init` を削除
 - **現在の状態**: `npm run build` 成功。`/`（動的）と `/api/news` が正常にビルドされたことを確認。**次のステップ**: `npm run dev` でローカル動作確認 → GitHub へプッシュ → Vercel にデプロイ（Step 17）
+
+### 2026-06-14（続き）
+- **作業内容**: Step 17 完了（GitHub プッシュ・Vercel デプロイ）
+  - GitHub リポジトリ作成: https://github.com/yuukawagoe-cpu/ai-news（Public）
+  - Vercel デプロイ成功（本番ビルド・全ルート確認済み）
+  - 本番 URL: https://ai-news-eight-ecru.vercel.app
+- **現在の状態**: **Phase 1 完全完了**。全機能が本番環境で動作中。
+- **備考**: Vercel の GitHub 連携（push 自動デプロイ）は Vercel ダッシュボード上で手動設定が必要（CLI での自動接続が失敗したため）。次回 `git push` 後は `npx vercel --prod` で再デプロイ可能。
+
+### 2026-06-14（Phase 2 完了）
+- **作業内容**: Phase 2 実装完了（セマンティック検索・AI要約）
+  - `python-backend/main.py` — FastAPI バックエンド
+    - fastembed（`all-MiniLM-L6-v2` 384次元 ONNX）で埋め込みベクトル生成
+    - Qdrant Cloud にRSS記事を索引化（起動時にバックグラウンドスレッドで実行）
+    - Groq API（`llama-3.3-70b-versatile`）を httpx 直接呼び出しで使用（SDK 非互換のため）
+    - 日本語クエリを英語に翻訳してから埋め込み（`translate_to_english()`）
+    - `/search` — セマンティック検索 + 日本語回答生成
+    - `/summarize` — 記事タイトル・概要から日本語3文要約
+    - Qdrant / Groq クライアントを遅延初期化（起動クラッシュ防止）
+  - `python-backend/requirements.txt` — groq SDK 削除・httpx バージョン固定解除
+  - `src/components/SummarizeButton.tsx` — 各記事カードの「AI要約を見る」ボタン
+  - `src/components/SearchClient.tsx` — 自然言語検索UI（クエリ入力・回答・関連記事一覧）
+  - `src/app/search/page.tsx` — 検索ページ
+  - `src/app/api/summarize/route.ts` — Vercel → Render.com プロキシ（BOM除去・エラー詳細付き）
+  - `src/app/api/search/route.ts` — Vercel → Render.com プロキシ（BOM除去・エラー詳細付き）
+  - `src/components/Header.tsx` — 「AI検索」ナビリンク追加
+  - `src/components/NewsCard.tsx` — `HAS_BACKEND` フラグで SummarizeButton 条件表示
+- **デプロイ先**:
+  - フロントエンド: https://ai-news-eight-ecru.vercel.app（Vercel）
+  - バックエンド: Render.com 無料枠（15分無操作でスリープ）
+- **解決した問題**:
+  - Render.com ポートスキャンタイムアウト → `ThreadPoolExecutor` でバックグラウンド索引化
+  - `KeyError: 'GROQ_API_KEY'` 起動クラッシュ → 遅延初期化で解決
+  - groq SDK が httpx 0.28 と非互換 → SDK 削除・httpx REST 直接呼び出しに変更
+  - `PYTHON_API_URL` の BOM 文字（PowerShell の `echo` が付加）→ `.replace(/^﻿/, "")` で除去
+  - 日本語クエリの検索精度低下 → Groq で英語翻訳してから埋め込み
+- **現在の状態**: **Phase 2 完全完了**。要約・セマンティック検索とも本番環境で動作確認済み。

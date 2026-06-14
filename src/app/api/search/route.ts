@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server"
 
 export async function POST(request: NextRequest): Promise<Response> {
-  const backendUrl = process.env.PYTHON_API_URL
+  const backendUrl = process.env.PYTHON_API_URL?.replace(/^﻿/, "").trim()
   if (!backendUrl) {
     return Response.json({ error: "Backend not configured" }, { status: 503 })
   }
@@ -13,7 +13,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       body: JSON.stringify(body),
     })
     return Response.json(await res.json(), { status: res.status })
-  } catch {
-    return Response.json({ error: "Search failed" }, { status: 500 })
+  } catch (e) {
+    return Response.json({ error: "Search failed", detail: String(e) }, { status: 500 })
   }
 }
