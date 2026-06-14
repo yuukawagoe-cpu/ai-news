@@ -40,6 +40,11 @@ def _get_qdrant() -> QdrantClient:
     return QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"])
 
 
+def translate_to_english(query: str) -> str:
+    prompt = f"Translate the following to English. Return only the translation, nothing else:\n{query}"
+    return call_groq(prompt, max_tokens=100)
+
+
 def call_groq(prompt: str, max_tokens: int) -> str:
     with httpx.Client(timeout=30) as client:
         res = client.post(
@@ -143,7 +148,9 @@ def summarize(req: SummarizeReq):
 @app.post("/search")
 def search(req: SearchReq):
     try:
-        vector = embed(req.query)
+        english_query = translate_to_english(req.query)
+        print(f"[search] original='{req.query}' → translated='{english_query}'")
+        vector = embed(english_query)
         hits = _get_qdrant().search(collection_name=COLLECTION, query_vector=vector, limit=10)
 
         items = [
